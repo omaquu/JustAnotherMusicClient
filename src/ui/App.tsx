@@ -1528,6 +1528,20 @@ useEffect(() => {
     const unlisten = await listen<{ volume: number }>("mini-player:volume", (event) => {
       const volume = Math.min(1, Math.max(0, event.payload.volume));
       void playerController.setVolume(volume);
+      if (playerController.isMuted() && volume > 0) {
+        void playerController.toggleMute();
+      }
+    });
+    return unlisten;
+  };
+  const cleanup = setup();
+  return () => { cleanup.then(fn => fn()); };
+}, []);
+
+useEffect(() => {
+  const setup = async () => {
+    const unlisten = await listen("mini-player:toggle-mute", () => {
+      void playerController.toggleMute();
     });
     return unlisten;
   };

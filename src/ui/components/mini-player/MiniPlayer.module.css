@@ -68,6 +68,28 @@
   pointer-events: all;
 }
 
+.volumeIconWrapper {
+  width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, margin 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.volumeIconVisible {
+  width: 14px;
+  opacity: 1;
+  margin-right: 8px;
+}
+
 .scrubberInput {
   width: 100%;
   height: 16px;

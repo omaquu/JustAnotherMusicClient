@@ -4,10 +4,11 @@ import {
   useState,
   type CSSProperties,
   type FocusEvent,
-  type FormEvent,
+  type SyntheticEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
+  type WheelEvent,
 } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
@@ -19,6 +20,8 @@ import {
   IconPlayerSkipBack,
   IconPlayerSkipForward,
   IconX,
+  IconVolume,
+  IconVolumeOff,
 } from "@tabler/icons-react";
 import { saveMiniPlayerPosition, useMiniPlayerHoverAction } from "../../settings/miniPlayer";
 import { isLinux, isMacOS, isWindows } from "../../platform";
@@ -73,6 +76,7 @@ export default function MiniPlayer() {
   const dragTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const seekPreviewClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumePreviewClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const volumeEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSeekScrubbingRef = useRef(false);
   const isSliderActiveRef = useRef(false);
   const lastSliderInputTimeStampRef = useRef<number | null>(null);
@@ -82,6 +86,8 @@ export default function MiniPlayer() {
   const macAlbumDragActiveRef = useRef(false);
   const macAlbumDragMovedRef = useRef(false);
   const suppressNextAlbumArtClickRef = useRef(false);
+
+  const isVolumeMode = hoverAction === "volume" || volumePreview !== null;
 
   const setIgnoreCursorEventsWhenReady = async (ignore: boolean) => {
     if (isLinux) return;
@@ -139,6 +145,9 @@ export default function MiniPlayer() {
       }
       if (volumePreviewClearTimerRef.current) {
         clearTimeout(volumePreviewClearTimerRef.current);
+      }
+      if (volumeEmitTimerRef.current) {
+        clearTimeout(volumeEmitTimerRef.current);
       }
       setIsDragging(false);
     };
@@ -554,7 +563,28 @@ export default function MiniPlayer() {
     volumePreviewClearTimerRef.current = setTimeout(() => {
       setVolumePreview(null);
       volumePreviewClearTimerRef.current = null;
-    }, 500);
+    }, 1500);
+  };
+
+  const emitVolumeDebounced = (volume: number) => {
+    setVolumePreview(volume);
+    if (volumeEmitTimerRef.current) clearTimeout(volumeEmitTimerRef.current);
+    volumeEmitTimerRef.current = setTimeout(() => {
+      void emit("mini-player:volume", { volume });
+    }, 20);
+  };
+
+  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+    // direction > 0 if scrolling up (volume up), < 0 if scrolling down
+    const direction = event.deltaY < 0 ? 1 : -1;
+    const step = 0.05; // 5% per scroll click
+    
+    // Use the actual volume (ignoring muted state) to remember the previous level
+    const currentVolume = volumePreview ?? volumeState.volume;
+    const nextVolume = Math.min(1, Math.max(0, currentVolume + (direction * step)));
+    
+    keepVolumePreviewUntilSync();
+    emitVolumeDebounced(nextVolume);
   };
 
   const finishSliderInteraction = () => {
@@ -568,7 +598,12 @@ export default function MiniPlayer() {
     event.currentTarget.setPointerCapture(event.pointerId);
     isSliderActiveRef.current = true;
     setExpandedBoth(true);
-    if (hoverAction !== "seek") return;
+    if (isVolumeMode) {
+      if (volumePreviewClearTimerRef.current) {
+        clearTimeout(volumePreviewClearTimerRef.current);
+      }
+      return;
+    }
 
     isSeekScrubbingRef.current = true;
     const target = Number(event.currentTarget.value);
@@ -577,7 +612,7 @@ export default function MiniPlayer() {
   };
 
   const handleSliderPointerEnd = () => {
-    if (hoverAction !== "seek") {
+    if (isVolumeMode) {
       keepVolumePreviewUntilSync();
       finishSliderInteraction();
       return;
@@ -604,14 +639,13 @@ export default function MiniPlayer() {
     setVolumePreview(null);
   };
 
-  const handleSliderInput = (event: FormEvent<HTMLInputElement>) => {
+  const handleSliderInput = (event: SyntheticEvent<HTMLInputElement>) => {
     if (event.timeStamp === lastSliderInputTimeStampRef.current) return;
     lastSliderInputTimeStampRef.current = event.timeStamp;
 
-    const value = parseFloat(event.currentTarget.value);
-    if (hoverAction === "volume") {
-      setVolumePreview(value);
-      void emit("mini-player:volume", { volume: value });
+    const value = Number.parseFloat(event.currentTarget.value);
+    if (isVolumeMode) {
+      emitVolumeDebounced(value);
       return;
     }
 
@@ -625,7 +659,7 @@ export default function MiniPlayer() {
 
   const handleSliderKeyUp = (event: KeyboardEvent<HTMLInputElement>) => {
     if (
-      hoverAction !== "seek"
+      isVolumeMode
       || !["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)
     ) {
       return;
@@ -641,10 +675,11 @@ export default function MiniPlayer() {
   const artworkUrl = playerState.artworkUrl ?? cachedArtwork;
   const displayedVolume = volumePreview ?? (volumeState.muted ? 0 : volumeState.volume);
   const displayedTime = seekPreviewTime ?? timeState.currentTime;
-  const sliderValue = hoverAction === "volume" ? displayedVolume : displayedTime;
-  const sliderMax = hoverAction === "volume" ? 1 : timeState.duration || 100;
-  const sliderStep = hoverAction === "volume" ? 0.01 : "any";
-  const sliderProgress = hoverAction === "volume"
+  
+  const sliderValue = isVolumeMode ? displayedVolume : displayedTime;
+  const sliderMax = isVolumeMode ? 1 : timeState.duration || 100;
+  const sliderStep = isVolumeMode ? 0.01 : "any";
+  const sliderProgress = isVolumeMode
     ? displayedVolume * 100
     : timeState.duration > 0
       ? (displayedTime / timeState.duration) * 100
@@ -655,12 +690,21 @@ export default function MiniPlayer() {
       ref={wrapperRef}
       className={`${styles.wrapper} ${expanded ? styles.wrapperExpanded : ""}`}
       onBlur={handleMacFocusOut}
+      onWheel={handleWheel}
     >
       <div
         className={`${styles.expandedPill} ${expanded ? styles.expandedPillVisible : ""}`}
         onMouseEnter={handleMacPointerEnter}
         onMouseLeave={handleMacPointerLeave}
       >
+        <button 
+          type="button" 
+          className={`${styles.volumeIconWrapper} ${isVolumeMode ? styles.volumeIconVisible : ""}`}
+          onClick={() => void emit("mini-player:toggle-mute")}
+          aria-label={volumeState.muted || displayedVolume === 0 ? "Unmute" : "Mute"}
+        >
+          {volumeState.muted || displayedVolume === 0 ? <IconVolumeOff size={14} /> : <IconVolume size={14} />}
+        </button>
         <input
           type="range"
           min={0}
@@ -674,7 +718,7 @@ export default function MiniPlayer() {
           onPointerUp={handleSliderPointerEnd}
           onPointerCancel={handleSliderPointerCancel}
           className={styles.scrubberInput}
-          aria-label={hoverAction === "volume" ? "Volume" : "Song position"}
+          aria-label={isVolumeMode ? "Volume" : "Song position"}
           style={{
             "--slider-progress": `${sliderProgress}%`,
           } as CSSProperties}
