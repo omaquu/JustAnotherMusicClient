@@ -19,10 +19,6 @@ fn main() {
     // Some dev setups enable WebView2 "Visual Diagnostics" via environment variables,
     // which shows an annoying size/diagnostics label overlay in the top-left.
     // Ensure the app never inherits that overlay.
-    // We also disable HardwareMediaKeyHandling so that our Rust backend can handle media keys via SMTC.
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--disable-features=HardwareMediaKeyHandling",
-    );
+    std::env::remove_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
     just_another_music_client_lib::run()
 }
