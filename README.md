@@ -92,21 +92,7 @@ Download the **newest available installer** from the [latest release](https://gi
 </a>
 
 ## Roadmap 📌
-- Website with easy download buttons!
-- **Better lyrics consistency** (some songs still don't have them)
-- Raycast support with app specific URLs
-- Fix Windows media player controls sometimes not working
-- **Music Video** support
-- ~~Last.fm integration~~
-- ~~App Auto-Update so that you don't manually have to check for changes~~
-- ~~Maximize Button + An option for Windows-style window controls~~
-- ~~Start App on boot option~~
-- ~~Liked songs playlist support~~
-- ~~Discord RCP is coming~~
-- ~~Full Linux and MacOS support~~
-- ~~Space to pause sometimes selects elements instead of pausing / resuming~~
-- ~~Cap Too long Song names and make them smoothly move vertically~~
-- ~~Artist Pages with monthly listeners, playlists and popular songs alongside streams amount feature when clicking on the artist name, also integrate into the search results so that one can find artists~~
+View the 👉 [public roadmap here](https://justanothermusicclient.userjot.com/) 👈
 
 ## Platform Support 💻
 
