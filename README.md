@@ -15,7 +15,7 @@
 </p>
 <br>
 
-A desktop YouTube Music client built with Tauri, React, and TypeScript for **Windows, MacOs & Linux**.
+A desktop YouTube Music client built with Tauri, React, and TypeScript for **Windows, MacOs & Linux**. [Watch an introduction Video 🎥](https://youtu.be/Ninizwv238s?si=wA8fRk_lP3kesG2B)
 
 <br>
 
