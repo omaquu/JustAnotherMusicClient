@@ -1,7 +1,6 @@
 {
   lib,
   rustPlatform,
-  fetchFromGitHub,
 
   nodejs,
   npmHooks,
@@ -29,14 +28,9 @@
 
 rustPlatform.buildRustPackage rec {
   pname = "just-another-music-client";
-  version = "1.2.82";
+  version = "1.3.00";
 
-  src = fetchFromGitHub {
-    owner = "2latemc";
-    repo = "JustAnotherMusicClient";
-    rev = "v${version}";
-    hash = "sha256-G6eLD+JGppXGQaHrhecN0hTeLoCCzncU9k6poNmMBOs=";
-  };
+  src = lib.cleanSource ../.;
 
   cargoRoot = "src-tauri";
   cargoLock = {

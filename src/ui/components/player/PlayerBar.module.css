@@ -4,14 +4,45 @@
   left: 0;
   right: 0;
   height: 88px;
-  background: rgb(5 5 5 / 72%);
-  border-top: 1px solid rgb(255 255 255 / 9%);
+  background: var(--color-player-chrome);
+  border-top: 1px solid var(--color-border);
   backdrop-filter: blur(26px) saturate(120%);
-  box-shadow: 0 -14px 40px rgb(0 0 0 / 26%);
+  box-shadow: var(--shadow-chrome);
   display: flex;
   flex-direction: column;
   z-index: 100;
 
+}
+
+:global(html[data-app-theme="glass"]) .playerBar {
+  left: 18px;
+  right: 18px;
+  bottom: 16px;
+  height: 86px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 13%), transparent 58%),
+    linear-gradient(110deg, rgb(246 195 122 / 11%), rgb(190 137 255 / 8%) 48%, rgb(91 202 183 / 8%)),
+    var(--color-player-chrome);
+  backdrop-filter: blur(38px) saturate(155%) contrast(1.08);
+  -webkit-backdrop-filter: blur(38px) saturate(155%) contrast(1.08);
+  box-shadow:
+    0 22px 62px rgb(7 4 12 / 42%),
+    0 4px 16px rgb(246 195 122 / 8%),
+    inset 0 1px 0 rgb(255 255 255 / 22%),
+    inset 0 -1px 0 rgb(255 255 255 / 7%);
+}
+
+:global(html[data-app-theme="glass"]) .playerBar::before {
+  content: "";
+  position: absolute;
+  inset: 1px 1px auto;
+  height: 34px;
+  border-radius: 19px 19px 12px 12px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 18%), transparent);
+  pointer-events: none;
 }
 
 .offlinePrompt {
@@ -24,11 +55,11 @@
   gap: 14px;
   max-width: min(480px, calc(100% - 32px));
   padding: 6px 7px 6px 16px;
-  border: 1px solid rgb(255 255 255 / 13%);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-full);
-  background: rgb(35 35 37 / 94%);
+  background: var(--color-bg-elevated);
   color: var(--color-text-primary);
-  box-shadow: 0 14px 34px rgb(0 0 0 / 45%);
+  box-shadow: var(--shadow-panel);
   backdrop-filter: blur(20px) saturate(125%);
   transform: translateX(-50%);
   animation: offlinePromptIn 180ms ease-out;
@@ -48,10 +79,10 @@
   gap: 7px;
   min-height: 34px;
   padding: 0 13px 0 10px;
-  border: 1px solid rgb(255 255 255 / 12%);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-full);
-  background: rgb(210 42 51 / 92%);
-  color: white;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
   font: inherit;
   font-size: var(--font-size-sm);
   font-weight: 600;
@@ -60,7 +91,7 @@
 }
 
 .reconnectButton:hover:not(:disabled) {
-  background: rgb(231 51 61 / 96%);
+  background: var(--color-accent-hover);
   transform: translateY(-1px);
 }
 
@@ -104,6 +135,14 @@
   height: 4px;
   position: relative;
   top: -2px;
+}
+
+:global(html[data-app-theme="glass"]) .seekBarContainer {
+  width: calc(100% - 26px);
+  margin: 0 auto;
+  top: 8px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
 }
 
 .controlsRow {
@@ -206,7 +245,7 @@
 
 .iconButton:hover:not(:disabled) {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-control-hover);
 }
 
 .iconButton:active:not(:disabled) {
@@ -220,8 +259,8 @@
 
 .activeControl {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.14);
+  background: var(--color-control-active);
+  border-color: var(--color-border);
 }
 
 /* Responsive adjustments */
@@ -255,6 +294,14 @@
 
   .playerBar {
     height: 80px;
+  }
+
+  :global(html[data-app-theme="glass"]) .playerBar {
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    height: 80px;
+    border-radius: 16px;
   }
 
   .controlsRow {

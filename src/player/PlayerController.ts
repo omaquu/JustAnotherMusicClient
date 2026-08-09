@@ -9,6 +9,7 @@ import {
   savePlaybackSettings,
   type PlaybackSettings,
 } from "./playbackSettings";
+import { getDownloaderPlaybackSource } from "../plugins/official/downloader/downloaderStore";
 
 export type PlaybackOrderMode = "in-order" | "shuffle" | "repeat-one";
 
@@ -41,6 +42,7 @@ export interface PlayerSession {
 
 type Listener = () => void;
 const DISCORD_ASSET_URL_LIMIT = 256;
+const SCROBBLE_TICK_MS = 10_000;
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -114,6 +116,8 @@ export class PlayerController {
   private navigationRequest: Promise<void> = Promise.resolve();
   private playbackOrderMode: PlaybackOrderMode = "in-order";
   private isPlaylistMode = false;
+  private scrobbleTimerId: ReturnType<typeof setInterval> | null = null;
+  private reportingTrackId: string | null = null;
 
   private state: PlayerState = {
     status: "idle",
@@ -210,6 +214,7 @@ export class PlayerController {
   }
 
   async loadTrack(track: Track): Promise<void> {
+    this.finishPlayReport();
     logInternalInfo("PlayerController.loadTrack start", { trackId: track.id });
     this.pendingSeekTime = null;
     this.setState({ status: "loading", error: null });
@@ -235,6 +240,7 @@ export class PlayerController {
     playbackQueue?: readonly Track[],
     autoplayWhenQueueEnds = false,
   ): Promise<boolean> {
+    this.finishPlayReport();
     const requestId = ++this.playTrackRequestId;
     logInternalInfo("PlayerController.playTrackById start", { videoId });
     this.audioEngine.stop();
@@ -357,6 +363,7 @@ export class PlayerController {
       currentTrackId: this.state.currentTrack?.id ?? null,
     });
     try {
+      this.finishPlayReport();
       this.audioEngine.pause();
       this.setState({ status: "paused", error: null });
       logInternalInfo("PlayerController.pause success");
@@ -500,6 +507,7 @@ export class PlayerController {
   private async handleTrackEnded(): Promise<void> {
     if (this.handlingTrackEnd || !this.isTabActive) return;
     this.handlingTrackEnd = true;
+    this.finishPlayReport();
 
     try {
       if (this.playbackOrderMode === "repeat-one" && this.state.currentTrack) {
@@ -736,18 +744,29 @@ export class PlayerController {
         });
         return;
       }
-      const audioData = this.audioEngine.usesNativeAudio()
-        ? await this.dataSource.getStreamData?.(track)
-        : undefined;
-      if (this.audioEngine.usesNativeAudio() && !audioData) {
+      const downloadedSource = await getDownloaderPlaybackSource(track);
+      const audioData = downloadedSource
+        ?? (this.audioEngine.usesNativeAudio()
+          ? await this.dataSource.getStreamData?.(track)
+          : undefined);
+      if ((this.audioEngine.usesNativeAudio() || downloadedSource) && !audioData) {
         throw new Error("The data source does not support native audio playback.");
       }
-      await this.audioEngine.loadTrack(
-        track.id,
-        audioData?.bytes,
-        audioData?.mimeType,
-        audioData?.sourceUrl,
-      );
+      if (downloadedSource) {
+        await this.audioEngine.loadNativeFallback(
+          track.id,
+          audioData?.bytes,
+          audioData?.mimeType,
+          audioData?.sourceUrl,
+        );
+      } else {
+        await this.audioEngine.loadTrack(
+          track.id,
+          audioData?.bytes,
+          audioData?.mimeType,
+          audioData?.sourceUrl,
+        );
+      }
 
       this.loadedTrackId = track.id;
       if (this.pendingSeekTime !== null) {
@@ -771,7 +790,11 @@ export class PlayerController {
   }
 
   private async playLoadedTrack(): Promise<boolean> {
-    return this.audioEngine.play();
+    const started = await this.audioEngine.play();
+    if (started && this.state.currentTrack) {
+      this.beginPlayReport(this.state.currentTrack);
+    }
+    return started;
   }
 
   private setState(partial: Partial<PlayerState>) {
@@ -782,7 +805,108 @@ export class PlayerController {
       trackId: partial.currentTrack?.id ?? this.state.currentTrack?.id ?? null,
     });
     this.state = { ...this.state, ...partial };
+    this.syncScrobbleTicker();
     this.emit();
+  }
+
+  private beginPlayReport(track: Track): void {
+    if (track.source !== "youtube") {
+      logInternalDebug("PlayerController.beginPlayReport skipped non-youtube", {
+        trackId: track.id,
+        source: track.source,
+      });
+      return;
+    }
+    if (this.reportingTrackId === track.id) {
+      logInternalDebug("PlayerController.beginPlayReport skipped duplicate", {
+        trackId: track.id,
+      });
+      return;
+    }
+    const beginPlayReport = this.dataSource.beginPlayReport?.bind(this.dataSource);
+    if (!beginPlayReport) {
+      logInternalWarn("PlayerController.beginPlayReport unavailable", {
+        trackId: track.id,
+      });
+      return;
+    }
+    this.reportingTrackId = track.id;
+    logInternalInfo("PlayerController.beginPlayReport start", {
+      trackId: track.id,
+      currentTime: this.audioEngine.getCurrentTime(),
+      duration: this.audioEngine.getDuration(),
+    });
+    void beginPlayReport(track)
+      .then((started) => {
+        if (started === false && this.reportingTrackId === track.id) {
+          this.reportingTrackId = null;
+        }
+        logInternalInfo("PlayerController.beginPlayReport result", {
+          trackId: track.id,
+          started,
+          reportingTrackId: this.reportingTrackId,
+        });
+      })
+      .catch((error) => {
+        if (this.reportingTrackId === track.id) {
+          this.reportingTrackId = null;
+        }
+        logInternalWarn("PlayerController.beginPlayReport failed", {
+          trackId: track.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  private finishPlayReport(): void {
+    const track = this.state.currentTrack;
+    if (!track || this.reportingTrackId !== track.id) {
+      logInternalDebug("PlayerController.finishPlayReport skipped", {
+        trackId: track?.id ?? null,
+        reportingTrackId: this.reportingTrackId,
+      });
+      return;
+    }
+    this.reportingTrackId = null;
+    logInternalInfo("PlayerController.finishPlayReport", {
+      trackId: track.id,
+      currentTime: this.audioEngine.getCurrentTime(),
+      duration: this.audioEngine.getDuration(),
+    });
+    void this.dataSource.updatePlayReport?.(track, this.audioEngine.getCurrentTime(), true);
+  }
+
+  private syncScrobbleTicker(): void {
+    const track = this.state.currentTrack;
+    const wanted = this.state.status === "playing"
+      && this.isTabActive
+      && track?.source === "youtube";
+
+    if (wanted === (this.scrobbleTimerId !== null)) return;
+
+    if (!wanted) {
+      if (this.scrobbleTimerId !== null) clearInterval(this.scrobbleTimerId);
+      this.scrobbleTimerId = null;
+      logInternalDebug("PlayerController.syncScrobbleTicker stopped", {
+        status: this.state.status,
+        isTabActive: this.isTabActive,
+        trackId: track?.id ?? null,
+        trackSource: track?.source ?? null,
+      });
+      return;
+    }
+
+    logInternalInfo("PlayerController.syncScrobbleTicker started", {
+      trackId: track.id,
+      status: this.state.status,
+      isTabActive: this.isTabActive,
+      intervalMs: SCROBBLE_TICK_MS,
+    });
+    this.scrobbleTimerId = setInterval(() => {
+      const track = this.state.currentTrack;
+      if (!track || this.state.status !== "playing") return;
+      void this.dataSource.updatePlayReport?.(track, this.audioEngine.getCurrentTime(), false);
+    }, SCROBBLE_TICK_MS);
   }
 
   private appendHistory(track: Track): Track[] {
@@ -884,7 +1008,7 @@ export class PlayerController {
   }
 
   async setVolume(level: number, muted = level <= 0): Promise<void> {
-    logInternalInfo("PlayerController.setVolume", { level, muted });
+    logInternalDebug("PlayerController.setVolume", { level, muted });
     this.audioEngine.setVolume(level);
     this.audioEngine.setMuted(muted);
     this.setState({
@@ -936,7 +1060,9 @@ export class PlayerController {
   }
 
   private shouldResumeAfterNavigation(): boolean {
-    return this.state.status === "playing" || this.state.status === "loading";
+    return this.state.status === "playing"
+      || this.state.status === "loading"
+      || this.state.status === "paused";
   }
 
   private cancelLoadingPlayback(): void {
@@ -950,6 +1076,7 @@ export class PlayerController {
 
   suspendForTabSwitch(): void {
     this.isTabActive = false;
+    this.syncScrobbleTicker();
     if (this.state.status === "playing") {
       this.audioEngine.suspend();
     }
@@ -957,6 +1084,7 @@ export class PlayerController {
 
   async resumeFromTabSwitch(): Promise<void> {
     this.isTabActive = true;
+    this.syncScrobbleTicker();
     if (this.state.status !== "playing" || !this.state.currentTrack) return;
 
     try {
@@ -970,6 +1098,9 @@ export class PlayerController {
   }
 
   dispose(): void {
+    this.finishPlayReport();
+    if (this.scrobbleTimerId !== null) clearInterval(this.scrobbleTimerId);
+    this.scrobbleTimerId = null;
     this.isTabActive = false;
     this.audioEngine.setOnEnded(null);
     this.audioEngine.dispose();

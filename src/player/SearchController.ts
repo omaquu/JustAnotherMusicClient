@@ -1,6 +1,25 @@
 import type { DataSource } from "../datasource/DataSource";
 import type { SearchResults, Track } from "../datasource/types";
 
+function streamSortValue(track: Track): number {
+  return track.viewCount ?? -1;
+}
+
+function sortTracksByStreams(tracks: Track[]): Track[] {
+  return [...tracks].sort((first, second) => {
+    const streamDifference = streamSortValue(second) - streamSortValue(first);
+    if (streamDifference !== 0) return streamDifference;
+    return first.title.localeCompare(second.title);
+  });
+}
+
+function sortSearchResultsByStreams(results: SearchResults): SearchResults {
+  return {
+    ...results,
+    tracks: sortTracksByStreams(results.tracks),
+  };
+}
+
 export class SearchController {
   constructor(private readonly dataSource: DataSource) {}
 
@@ -13,7 +32,11 @@ export class SearchController {
       return { artists: [], tracks: [], albums: [], playlists: [] };
     }
     if (this.dataSource.search) {
-      return this.dataSource.search(normalizedQuery, onUpdate);
+      const sortUpdate = onUpdate
+        ? (results: SearchResults) => onUpdate(sortSearchResultsByStreams(results))
+        : undefined;
+      const results = await this.dataSource.search(normalizedQuery, sortUpdate);
+      return sortSearchResultsByStreams(results);
     }
     const tracks = await this.searchTracks(normalizedQuery, (items) => {
       onUpdate?.({ artists: [], tracks: items, albums: [], playlists: [] });
@@ -24,7 +47,11 @@ export class SearchController {
   async searchTracks(query: string, onUpdate?: (tracks: Track[]) => void): Promise<Track[]> {
     const normalizedQuery = query.trim();
     if (!normalizedQuery || !this.dataSource.searchTracks) return [];
-    return this.dataSource.searchTracks(normalizedQuery, onUpdate);
+    const sortUpdate = onUpdate
+      ? (tracks: Track[]) => onUpdate(sortTracksByStreams(tracks))
+      : undefined;
+    const tracks = await this.dataSource.searchTracks(normalizedQuery, sortUpdate);
+    return sortTracksByStreams(tracks);
   }
 
   async getSearchSuggestions(

@@ -17,9 +17,19 @@ import type {
   Track,
 } from "../types";
 import { collectArtworkCandidates, getVideoArtworkFallback, selectArtworkUrl } from "./artwork";
-import { tauriFetch } from "./tauriFetch";
+import { mintPoToken } from "./poToken";
+import { getLiveCookie, setLiveCookie, tauriFetch } from "./tauriFetch";
+import {
+  getStreamingQuality,
+  selectFormatForQuality,
+  type AudioQuality,
+} from "../../internal/audioQuality";
+import {
+  usesAuthenticatedStreaming,
+  usesYouTubeScrobbling,
+} from "../../ui/settings/youtubeAccount";
 
-type ClientLabel = "music" | "web";
+type ClientLabel = "music" | "web" | "anonymous" | "download";
 type NativeAudioPayload = {
   bodyBase64: string;
   mimeType: string;
@@ -211,10 +221,23 @@ type RawToggleMenuServiceItemRenderer = {
 type AccountCandidate = {
   accountIndex: number;
   name?: string;
+  artworkUrl?: string;
   onBehalfOfUser?: string;
   serializedDelegationContext?: string;
   selected?: boolean;
 };
+
+function accountCandidateKey(candidate: {
+  accountIndex: number;
+  onBehalfOfUser?: string | null;
+  serializedDelegationContext?: string | null;
+}): string {
+  return [
+    candidate.accountIndex,
+    candidate.onBehalfOfUser ?? "",
+    candidate.serializedDelegationContext ?? "",
+  ].join(":");
+}
 
 type LibraryResponses = {
   client: Innertube;
@@ -223,6 +246,49 @@ type LibraryResponses = {
   historyResponse: unknown;
 };
 
+function createPlaybackNonce(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte & 63]).join("");
+}
+
+function summarizePlaybackStatsUrl(baseUrl: string): Record<string, unknown> {
+  try {
+    const url = new URL(baseUrl);
+    const safeKeys = [
+      "docid",
+      "ns",
+      "el",
+      "len",
+      "c",
+      "cver",
+      "fmt",
+      "feature",
+      "referrer",
+      "uga",
+      "plid",
+    ];
+    const params: Record<string, string> = {};
+    for (const key of safeKeys) {
+      const value = url.searchParams.get(key);
+      if (value) params[key] = value;
+    }
+    return {
+      endpoint: url.pathname,
+      paramCount: [...url.searchParams.keys()].length,
+      params,
+      hasOf: url.searchParams.has("of"),
+      hasVm: url.searchParams.has("vm"),
+      hasCpn: url.searchParams.has("cpn"),
+    };
+  } catch (error) {
+    return {
+      parseError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 const LIKED_SONGS_PLAYLIST_ID = "LM";
 const LIBRARY_CACHE_KEY = "youtube-music:library:v5";
 const ARTIST_CACHE_VERSION = "v3";
@@ -230,6 +296,7 @@ const ARTIST_SUBSCRIPTION_OVERRIDE_MS = 60_000;
 const PLAYLIST_PAGE_SESSION_TTL_MS = 10 * 60_000;
 const PLAYLIST_TRACK_CACHE_VERSION = "v4";
 const PLAYLIST_EMPTY_RETRY_DELAYS_MS = [0, 600, 1_500];
+const SELECTED_ACCOUNT_STORAGE_KEY = "youtube-music:selected-account";
 
 class YouTubeMusicAuthError extends Error {
   constructor(message: string) {
@@ -241,11 +308,21 @@ class YouTubeMusicAuthError extends Error {
 export class YouTubeMusicDataSource extends DataSource {
   private musicClientPromise: Promise<Innertube> | null = null;
   private webClientPromise: Promise<Innertube> | null = null;
-  private musicCookie: string | null = null;
+  private anonymousClientPromise: Promise<Innertube> | null = null;
+  private downloadClientPromise: Promise<Innertube> | null = null;
   private musicAccountIndex = 0;
   private musicOnBehalfOfUser: string | null = null;
   private musicSerializedDelegationContext: string | null = null;
   private musicAccountName = "YouTube Music";
+  private musicAccountArtworkUrl: string | null = null;
+  private playReport: {
+    trackId: string;
+    cpn: string;
+    playbackUrl: string;
+    watchtimeUrl: string;
+    startedAt: number;
+    lastReportedSec: number;
+  } | null = null;
   private libraryRefreshPromise: Promise<LibrarySnapshot> | null = null;
   private readonly albumRefreshPromises = new Map<string, Promise<Track[]>>();
   private readonly playlistRefreshPromises = new Map<string, Promise<Track[]>>();
@@ -262,6 +339,14 @@ export class YouTubeMusicDataSource extends DataSource {
   constructor() {
     super();
     this.setupJavaScriptEvaluator();
+  }
+
+  private get musicCookie(): string | null {
+    return getLiveCookie();
+  }
+
+  private set musicCookie(cookie: string | null) {
+    setLiveCookie(cookie);
   }
 
   private setupJavaScriptEvaluator() {
@@ -282,6 +367,15 @@ export class YouTubeMusicDataSource extends DataSource {
       cookie: this.musicCookie ?? (typeof document !== "undefined" ? document.cookie : undefined),
       account_index: this.musicAccountIndex,
       on_behalf_of_user: this.musicOnBehalfOfUser ?? undefined,
+      retrieve_player: retrievePlayer,
+      generate_session_locally: true,
+    } as const;
+  }
+
+  private getAnonymousSessionOptions(retrievePlayer = true) {
+    return {
+      fetch: tauriFetch,
+      user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
       retrieve_player: retrievePlayer,
       generate_session_locally: true,
     } as const;
@@ -318,8 +412,64 @@ export class YouTubeMusicDataSource extends DataSource {
     return this.webClientPromise;
   }
 
+  private getAnonymousClient(): Promise<Innertube> {
+    if (!this.anonymousClientPromise) {
+      logInternalInfo("YouTubeMusicDataSource.getAnonymousClient creating client");
+      this.anonymousClientPromise = Innertube.create({
+        ...this.getAnonymousSessionOptions(),
+        client_type: ClientType.WEB,
+      });
+    }
+
+    return this.anonymousClientPromise;
+  }
+
+  private getDownloadClient(): Promise<Innertube> {
+    if (!this.downloadClientPromise) {
+      logInternalInfo("YouTubeMusicDataSource.getDownloadClient creating client");
+      this.downloadClientPromise = (async () => {
+        const bootstrap = await Innertube.create({
+          fetch: tauriFetch,
+          retrieve_player: false,
+          generate_session_locally: false,
+        });
+
+        return Innertube.create({
+          fetch: tauriFetch,
+          retrieve_player: true,
+          generate_session_locally: false,
+          visitor_data: bootstrap.session.context.client.visitorData,
+          client_type: ClientType.MUSIC,
+        });
+      })();
+    }
+
+    return this.downloadClientPromise;
+  }
+
+  private async attestForTrack(client: Innertube, trackId: string): Promise<string | undefined> {
+    const poToken = await mintPoToken(trackId);
+    if (!poToken) return undefined;
+
+    client.session.po_token = poToken;
+    if (client.session.player) client.session.player.po_token = poToken;
+    return poToken;
+  }
+
   private async getClient(label: ClientLabel): Promise<Innertube> {
+    if (label === "download") return this.getDownloadClient();
+    if (label === "anonymous") return this.getAnonymousClient();
     return label === "music" ? this.getMusicClient() : this.getWebClient();
+  }
+
+  private withSessionClientVersion(streamUrl: string, client: Innertube): string {
+    const sessionVersion = client.session.context.client.clientVersion;
+    if (!sessionVersion) return streamUrl;
+
+    return streamUrl.replace(
+      /([?&]cver=)[^&]*/,
+      `$1${encodeURIComponent(sessionVersion)}`,
+    );
   }
 
   private async refreshMusicClientMetadata(client: Innertube): Promise<void> {
@@ -373,10 +523,16 @@ export class YouTubeMusicDataSource extends DataSource {
   }
 
   private resetMusicSessionSelection(): void {
+    try {
+      localStorage.removeItem(SELECTED_ACCOUNT_STORAGE_KEY);
+    } catch {
+      // A stale preference is ignored anyway if it cannot be read or does not match.
+    }
     this.musicAccountIndex = 0;
     this.musicOnBehalfOfUser = null;
     this.musicSerializedDelegationContext = null;
     this.musicAccountName = "YouTube Music";
+    this.musicAccountArtworkUrl = null;
     this.musicClientPromise = null;
     this.webClientPromise = null;
   }
@@ -1844,24 +2000,47 @@ export class YouTubeMusicDataSource extends DataSource {
     ].join(" ");
   }
 
-  private async getAccountCandidates(client: Innertube): Promise<AccountCandidate[]> {
+  private findDelegatedPageId(endpoint: unknown): string | undefined {
+    const datasync = this.findStringByKey(endpoint, new Set(["datasyncIdToken"]));
+    const pageId = datasync?.split("||")[0]?.trim();
+    if (pageId) return pageId;
+
+    return this.findStringByKey(endpoint, new Set(["channelIdentifier", "externalChannelId"]))
+      ?? this.findYoutubeChannelId(endpoint)
+      ?? this.findBrowseId(endpoint);
+  }
+
+  private readPreferredAccountKey(): string | null {
+    try {
+      return localStorage.getItem(SELECTED_ACCOUNT_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  private async getAccountCandidates(): Promise<AccountCandidate[]> {
     const fallback: AccountCandidate = { accountIndex: 0, name: "YouTube Music", selected: true };
     try {
+      const client = await this.getWebClient();
       const accountItems = await client.account.getInfo(true) as Array<{
         account_name?: { toString(): string };
         account_byline?: { toString(): string };
         channel_handle?: { toString(): string };
+        account_photo?: unknown;
         endpoint?: unknown;
         has_channel?: boolean;
         is_disabled?: boolean;
         is_selected?: boolean;
       }>;
+      if (accountItems.length === 0 && this.musicCookie) {
+        logInternalWarn("YouTubeMusicDataSource.getAccountCandidates signed-out stub");
+      }
+
       const candidates = accountItems
         .filter((item) => !item.is_disabled)
         .flatMap((item, index): AccountCandidate[] => {
           const endpoint = item.endpoint;
-          const onBehalfOfUser = this.findBrowseId(endpoint)
-            ?? this.findYoutubeChannelId(endpoint);
+          const onBehalfOfUser = this.findDelegatedPageId(endpoint);
           const serializedDelegationContext = this.findStringByKey(
             endpoint,
             new Set(["selectedSerializedDelegationContext", "serializedDelegationContext"]),
@@ -1870,13 +2049,15 @@ export class YouTubeMusicDataSource extends DataSource {
             || item.channel_handle?.toString()
             || item.account_byline?.toString()
             || undefined;
-          if (!onBehalfOfUser && !serializedDelegationContext && index === 0) {
-            return [{ ...fallback, name, selected: item.is_selected }];
+          const artworkUrl = selectArtworkUrl(collectArtworkCandidates(item.account_photo));
+          if (index === 0) {
+            return [{ ...fallback, name, artworkUrl, selected: item.is_selected }];
           }
           if (!onBehalfOfUser && !serializedDelegationContext) return [];
           return [{
             accountIndex: 0,
             name,
+            artworkUrl,
             onBehalfOfUser,
             serializedDelegationContext,
             selected: item.is_selected,
@@ -1884,17 +2065,43 @@ export class YouTubeMusicDataSource extends DataSource {
         });
 
       const unique = this.uniqueById(
-        [fallback, ...candidates].map((candidate) => ({
+        [...candidates, fallback].map((candidate) => ({
           ...candidate,
-          id: [
-            candidate.accountIndex,
-            candidate.onBehalfOfUser ?? "",
-            candidate.serializedDelegationContext ?? "",
-          ].join(":"),
+          id: accountCandidateKey(candidate),
         })),
       ).map(({ id: _id, ...candidate }) => candidate);
 
       logInternalInfo("YouTubeMusicDataSource.getAccountCandidates success", {
+        rawItemCount: accountItems.length,
+        rawEndpoints: accountItems.map((item) => {
+          const endpoint = item.endpoint as { name?: string; payload?: unknown } | undefined;
+          const tokens = (endpoint?.payload as { supportedTokens?: unknown[] } | undefined)
+            ?.supportedTokens;
+          return {
+            endpointName: endpoint?.name,
+            identityFields: Array.isArray(tokens)
+              ? tokens.flatMap((entry) =>
+                  entry && typeof entry === "object" ? Object.keys(entry) : [])
+              : undefined,
+            payloadKeys: endpoint?.payload && typeof endpoint.payload === "object"
+              ? Object.keys(endpoint.payload)
+              : undefined,
+          };
+        }),
+        derivedIds: accountItems.map((item) => {
+          const id = this.findDelegatedPageId(item.endpoint);
+          return id
+            ? { length: id.length, looksLikeChannel: id.startsWith("UC"), digitsOnly: /^\d+$/.test(id) }
+            : null;
+        }),
+        rawItemNames: accountItems.map((item) => ({
+          name: item.account_name?.toString(),
+          handle: item.channel_handle?.toString(),
+          hasPhoto: Boolean(item.account_photo),
+          hasChannel: item.has_channel,
+          disabled: item.is_disabled,
+          selected: item.is_selected,
+        })),
         candidateCount: unique.length,
         selectedCount: unique.filter((candidate) => candidate.selected).length,
         candidates: unique.map((candidate) => ({
@@ -1927,6 +2134,7 @@ export class YouTubeMusicDataSource extends DataSource {
     this.musicOnBehalfOfUser = candidate.onBehalfOfUser ?? null;
     this.musicSerializedDelegationContext = candidate.serializedDelegationContext ?? null;
     this.musicAccountName = candidate.name ?? "YouTube Music";
+    this.musicAccountArtworkUrl = candidate.artworkUrl ?? null;
     if (changed) {
       this.musicClientPromise = null;
       this.webClientPromise = null;
@@ -1952,7 +2160,31 @@ export class YouTubeMusicDataSource extends DataSource {
       ...initialResponses,
     };
     let bestSignal = this.getLibrarySignal(best.libraryLanding, best.historyResponse);
-    const profileCandidates = await this.getAccountCandidates(initialClient);
+    const profileCandidates = await this.getAccountCandidates();
+    const preferredKey = this.readPreferredAccountKey();
+    const preferred = preferredKey
+      ? profileCandidates.find((candidate) => accountCandidateKey(candidate) === preferredKey)
+      : undefined;
+    if (preferred) {
+      const client = await this.useAccountCandidate(preferred);
+      const responses = await this.loadLibraryResponses(client);
+      logInternalInfo("YouTubeMusicDataSource.findBestLibraryResponses using saved account", {
+        name: preferred.name,
+        hasOnBehalfOfUser: Boolean(preferred.onBehalfOfUser),
+        hasSerializedDelegationContext: Boolean(preferred.serializedDelegationContext),
+      });
+      return { client, account: preferred, ...responses };
+    }
+
+    const activeProfile = profileCandidates.find(
+      (candidate) => accountCandidateKey(candidate) === accountCandidateKey(best.account),
+    );
+    if (activeProfile) {
+      best = { ...best, account: { ...best.account, ...activeProfile } };
+      this.musicAccountName = activeProfile.name ?? this.musicAccountName;
+      this.musicAccountArtworkUrl = activeProfile.artworkUrl ?? this.musicAccountArtworkUrl;
+    }
+
     const authUserCandidates: AccountCandidate[] = bestSignal <= 0
       ? [1, 2, 3, 4, 5].map((accountIndex) => ({
           accountIndex,
@@ -1962,26 +2194,12 @@ export class YouTubeMusicDataSource extends DataSource {
     const candidates = this.uniqueById(
       [...profileCandidates, ...authUserCandidates].map((candidate) => ({
         ...candidate,
-        id: [
-          candidate.accountIndex,
-          candidate.onBehalfOfUser ?? "",
-          candidate.serializedDelegationContext ?? "",
-        ].join(":"),
+        id: accountCandidateKey(candidate),
       })),
     ).map(({ id: _id, ...candidate }) => candidate);
 
     for (const candidate of candidates) {
-      const key = [
-        candidate.accountIndex,
-        candidate.onBehalfOfUser ?? "",
-        candidate.serializedDelegationContext ?? "",
-      ].join(":");
-      const bestKey = [
-        best.account.accountIndex,
-        best.account.onBehalfOfUser ?? "",
-        best.account.serializedDelegationContext ?? "",
-      ].join(":");
-      if (key === bestKey) continue;
+      if (accountCandidateKey(candidate) === accountCandidateKey(best.account)) continue;
 
       try {
         const client = await this.useAccountCandidate(candidate, {
@@ -2185,6 +2403,7 @@ export class YouTubeMusicDataSource extends DataSource {
     return {
       account: {
         name: this.musicAccountName,
+        artworkUrl: this.musicAccountArtworkUrl ?? undefined,
       },
       albums,
       playlists,
@@ -4056,30 +4275,65 @@ export class YouTubeMusicDataSource extends DataSource {
 
   async getStreamUrl(track: Track): Promise<string> {
     logInternalInfo("YouTubeMusicDataSource.getStreamUrl start", { trackId: track.id });
+    const { url } = await this.resolveStreamUrl(track);
+    return url;
+  }
 
-    for (const label of ["music", "web"] as ClientLabel[]) {
+  private async resolveStream(
+    track: Track,
+    quality: AudioQuality,
+    clientOrder: readonly ClientLabel[],
+  ): Promise<{ url: string; mimeType: string; cookie?: string }> {
+    let streamUrl: string | null = null;
+    let streamMimeType = "audio/mp4";
+
+    for (const label of clientOrder) {
       try {
         const yt = await this.getClient(label);
-        const format = await yt.getStreamingData(track.id, { type: "audio", quality: "best" });
-        const url = typeof (format as any).url === "string"
-          ? (format as any).url
-          : await format.decipher(yt.session.player);
-
-        if (!url) {
-          throw new Error("YouTube.js returned an empty stream URL.");
+        const poToken = label === "download"
+          ? await this.attestForTrack(yt, track.id)
+          : undefined;
+        const info = await yt.getBasicInfo(track.id, poToken ? { po_token: poToken } : undefined);
+        const audioFormats = (info.streaming_data?.adaptive_formats ?? []).filter(
+          (candidate: any) => typeof candidate.mime_type === "string"
+            && candidate.mime_type.startsWith("audio/"),
+        );
+        const mp4Formats = audioFormats.filter(
+          (candidate: any) => candidate.mime_type.includes("audio/mp4"),
+        );
+        const candidates = quality === "high" || mp4Formats.length === 0
+          ? audioFormats
+          : mp4Formats;
+        const format = selectFormatForQuality(candidates as Array<{ bitrate?: number }>, quality) as
+          | (typeof candidates)[number]
+          | undefined;
+        if (!format) {
+          const offered = (info.streaming_data?.adaptive_formats ?? [])
+            .map((candidate: any) => candidate.mime_type)
+            .filter(Boolean)
+            .slice(0, 8);
+          throw new Error(
+            `YouTube returned no playable audio format. Offered: ${offered.join(", ") || "none"}`,
+          );
         }
 
-        logInternalInfo("YouTubeMusicDataSource.getStreamUrl success", {
+        streamUrl = this.withSessionClientVersion(await format.decipher(yt.session.player), yt);
+        if (!streamUrl) {
+          throw new Error("YouTube returned an empty audio URL.");
+        }
+
+        streamMimeType = (format as any).mime_type ?? "audio/mp4";
+        logInternalInfo("YouTubeMusicDataSource.resolveStream format selected", {
           trackId: track.id,
           client: label,
+          quality,
           itag: (format as any).itag ?? null,
-          mimeType: (format as any).mime_type ?? null,
-          urlLength: url.length,
+          mimeType: streamMimeType,
+          bitrate: (format as any).bitrate ?? null,
         });
-
-        return url;
+        break;
       } catch (error) {
-        logInternalWarn("YouTubeMusicDataSource.getStreamUrl client failed", {
+        logInternalWarn("YouTubeMusicDataSource.resolveStream client failed", {
           trackId: track.id,
           client: label,
           error: error instanceof Error ? error.message : String(error),
@@ -4087,12 +4341,216 @@ export class YouTubeMusicDataSource extends DataSource {
       }
     }
 
-    logInternalError(
-      "YouTubeMusicDataSource.getStreamUrl failed",
-      new Error("No YouTube client returned a playable audio URL."),
-      { trackId: track.id },
-    );
-    throw new Error("Unable to resolve a playable YouTube audio stream.");
+    if (!streamUrl) {
+      logInternalError(
+        "YouTubeMusicDataSource.resolveStream failed",
+        new Error("No YouTube client returned a playable audio URL."),
+        { trackId: track.id },
+      );
+      throw new Error("Unable to resolve a playable YouTube audio stream.");
+    }
+
+    return {
+      url: streamUrl,
+      mimeType: streamMimeType,
+      cookie: this.musicCookie ?? undefined,
+    };
+  }
+
+  async resolveStreamUrl(
+    track: Track,
+    quality: AudioQuality = getStreamingQuality(),
+  ): Promise<{ url: string; mimeType: string; cookie?: string }> {
+    const order: ClientLabel[] = usesAuthenticatedStreaming()
+      ? ["music", "web", "anonymous"]
+      : ["anonymous", "web", "music"];
+    return this.resolveStream(track, quality, order);
+  }
+
+  async resolveDownloadStream(
+    track: Track,
+    quality: AudioQuality = "normal",
+  ): Promise<{ url: string; mimeType: string; cookie?: string }> {
+    if (track.source !== "youtube") {
+      throw new Error("Only YouTube tracks can be downloaded.");
+    }
+
+    // Downloads should not be governed by the playback engine preference. Try the authenticated
+    // download client first, then fall back through the same clients used for playback.
+    return this.resolveStream(track, quality, ["download", "music", "web", "anonymous"]);
+  }
+
+  async beginPlayReport(track: Track): Promise<boolean> {
+    this.playReport = null;
+    const scrobblingEnabled = usesYouTubeScrobbling();
+    if (!scrobblingEnabled || track.source !== "youtube" || !this.musicCookie) {
+      logInternalInfo("YouTubeMusicDataSource.beginPlayReport skipped", {
+        trackId: track.id,
+        scrobblingEnabled,
+        trackSource: track.source,
+        hasCookie: Boolean(this.musicCookie),
+      });
+      return false;
+    }
+
+    try {
+      const yt = await this.getMusicClient();
+      const raw = await yt.actions.execute("/player", {
+        videoId: track.id,
+        racyCheckOk: true,
+        contentCheckOk: true,
+        playbackContext: {
+          contentPlaybackContext: {
+            vis: 0,
+            splay: false,
+            lactMilliseconds: "-1",
+            signatureTimestamp: (yt.session as { player?: { signature_timestamp?: number } })
+              .player?.signature_timestamp,
+          },
+        },
+        parse: false,
+      });
+      const tracking = (raw as any)?.data?.playbackTracking ?? (raw as any)?.playbackTracking;
+      const playbackUrl = tracking?.videostatsPlaybackUrl?.baseUrl;
+      const watchtimeUrl = tracking?.videostatsWatchtimeUrl?.baseUrl;
+      logInternalInfo("YouTubeMusicDataSource.beginPlayReport tracking urls", {
+        trackId: track.id,
+        hasPlaybackUrl: Boolean(playbackUrl),
+        hasWatchtimeUrl: Boolean(watchtimeUrl),
+        hasAtrUrl: Boolean(tracking?.atrUrl?.baseUrl),
+        hasQoeUrl: Boolean(tracking?.videostatsDelayplayUrl?.baseUrl),
+        playback: playbackUrl ? summarizePlaybackStatsUrl(playbackUrl) : null,
+        watchtime: watchtimeUrl ? summarizePlaybackStatsUrl(watchtimeUrl) : null,
+      });
+      if (!playbackUrl || !watchtimeUrl) {
+        logInternalWarn("YouTubeMusicDataSource.beginPlayReport no tracking urls", {
+          trackId: track.id,
+        });
+        return false;
+      }
+
+      const cpn = createPlaybackNonce();
+      this.playReport = {
+        trackId: track.id,
+        cpn,
+        playbackUrl,
+        watchtimeUrl,
+        startedAt: Date.now(),
+        lastReportedSec: 0,
+      };
+      await this.pingPlaybackStats(playbackUrl, {
+        cpn,
+        rtn: "0",
+      });
+      logInternalInfo("YouTubeMusicDataSource.beginPlayReport started", { trackId: track.id });
+      return true;
+    } catch (error) {
+      this.playReport = null;
+      logInternalWarn("YouTubeMusicDataSource.beginPlayReport failed", {
+        trackId: track.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  async updatePlayReport(track: Track, positionSec: number, final: boolean): Promise<void> {
+    const report = this.playReport;
+    if (!report || report.trackId !== track.id) {
+      logInternalDebug("YouTubeMusicDataSource.updatePlayReport skipped", {
+        trackId: track.id,
+        reportTrackId: report?.trackId ?? null,
+        hasReport: Boolean(report),
+        positionSec,
+        final,
+      });
+      return;
+    }
+    if (final) this.playReport = null;
+
+    const wallElapsed = Math.floor((Date.now() - report.startedAt) / 1000);
+    const watched = Math.max(0, Math.min(Math.floor(positionSec), wallElapsed));
+    if (watched <= report.lastReportedSec) {
+      logInternalDebug("YouTubeMusicDataSource.updatePlayReport no progress", {
+        trackId: track.id,
+        positionSec,
+        watched,
+        lastReportedSec: report.lastReportedSec,
+        wallElapsed,
+        final,
+      });
+      return;
+    }
+
+    try {
+      await this.pingPlaybackStats(report.watchtimeUrl, {
+        cpn: report.cpn,
+        st: "0",
+        et: String(watched),
+        cmt: String(watched),
+        state: final ? "paused" : "playing",
+        ...(final ? { final: "1" } : {}),
+      });
+      report.lastReportedSec = watched;
+      logInternalDebug("YouTubeMusicDataSource.updatePlayReport", {
+        trackId: track.id,
+        watched,
+        wallElapsed,
+        final,
+      });
+    } catch (error) {
+      logInternalWarn("YouTubeMusicDataSource.updatePlayReport failed", {
+        trackId: track.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async pingPlaybackStats(
+    baseUrl: string,
+    params: Record<string, string>,
+  ): Promise<void> {
+    const client = await this.getMusicClient();
+    const clientVersion = client.session.context.client.clientVersion;
+    const url = new URL(baseUrl);
+    const endpoint = url.pathname;
+    const query = {
+      ver: "2",
+      fmt: "251",
+      rt: "0",
+      c: "WEB_REMIX",
+      cver: clientVersion,
+      ...params,
+    };
+    for (const [key, value] of Object.entries(query)) {
+      url.searchParams.set(key, value);
+    }
+    logInternalInfo("YouTubeMusicDataSource.pingPlaybackStats request", {
+      endpoint,
+      params,
+      querySummary: summarizePlaybackStatsUrl(url.toString()),
+      hasCookie: Boolean(this.musicCookie),
+      accountIndex: this.musicAccountIndex,
+      hasOnBehalfOfUser: Boolean(this.musicOnBehalfOfUser),
+      hasSerializedDelegationContext: Boolean(this.musicSerializedDelegationContext),
+      clientVersion,
+    });
+    const response = await tauriFetch(url.toString(), {
+      headers: {
+        cookie: this.musicCookie ?? "",
+        "x-youtube-client-name": "67",
+        "x-youtube-client-version": clientVersion,
+        "x-goog-authuser": this.musicAccountIndex.toString(),
+      },
+    });
+    logInternalInfo("YouTubeMusicDataSource.pingPlaybackStats response", {
+      endpoint,
+      status: response.status,
+      ok: response.ok,
+    });
+    if (!response.ok) {
+      throw new Error(`YouTube playback stats returned HTTP ${response.status}.`);
+    }
   }
 
   async getStreamData(track: Track): Promise<StreamData> {
@@ -4116,48 +4574,7 @@ export class YouTubeMusicDataSource extends DataSource {
       };
     }
 
-    let streamUrl: string | null = null;
-    let streamMimeType = "audio/mp4";
-
-    for (const label of ["music", "web"] as ClientLabel[]) {
-      try {
-        const yt = await this.getClient(label);
-        const info = await yt.getBasicInfo(track.id);
-        const format = info.streaming_data?.adaptive_formats
-          ?.filter((candidate: any) => candidate.mime_type?.includes("audio/mp4"))
-          .sort((left: any, right: any) => (right.bitrate ?? 0) - (left.bitrate ?? 0))[0];
-        if (!format) {
-          throw new Error("YouTube returned no MP4 audio format.");
-        }
-
-        streamUrl = typeof (format as any).url === "string"
-          ? (format as any).url
-          : await format.decipher(yt.session.player);
-        if (!streamUrl) {
-          throw new Error("YouTube returned an empty MP4 audio URL.");
-        }
-
-        streamMimeType = (format as any).mime_type ?? "audio/mp4";
-        logInternalInfo("YouTubeMusicDataSource.getStreamData format selected", {
-          trackId: track.id,
-          client: label,
-          itag: (format as any).itag ?? null,
-          mimeType: streamMimeType,
-          bitrate: (format as any).bitrate ?? null,
-        });
-        break;
-      } catch (error) {
-        logInternalWarn("YouTubeMusicDataSource.getStreamData client failed", {
-          trackId: track.id,
-          client: label,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    if (!streamUrl) {
-      throw new Error("Unable to resolve a Linux-compatible MP4 audio stream.");
-    }
+    const { url: streamUrl, mimeType: streamMimeType, cookie } = await this.resolveStreamUrl(track);
 
     logInternalInfo("YouTubeMusicDataSource.getStreamData download start", {
       trackId: track.id,
@@ -4167,6 +4584,7 @@ export class YouTubeMusicDataSource extends DataSource {
       url: streamUrl,
       trackId: track.id,
       mimeType: streamMimeType,
+      cookie,
     });
     if (payload.byteLength === 0) {
       throw new Error("Audio download returned no data.");

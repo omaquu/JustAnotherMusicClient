@@ -8,6 +8,10 @@
   
 }
 
+:global(html[data-app-theme="glass"]) .root {
+  padding-bottom: 112px;
+}
+
 .content {
   flex: 1;
   min-height: 0;
@@ -42,6 +46,10 @@
 @media (max-width: 600px) {
   .root {
     padding-bottom: 80px;
+  }
+
+  :global(html[data-app-theme="glass"]) .root {
+    padding-bottom: 100px;
   }
 }
 
