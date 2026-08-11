@@ -66,21 +66,8 @@ fn list_windows_devices() -> Result<Vec<AudioDeviceInfo>, String> {
             };
 
             let mut label = format!("Audio Device {}", i + 1);
-
-            // Try to get friendly name from property store
-            if let Ok(props) = device.OpenPropertyStore(STGM_READ) {
-                // PKEY_Device_FriendlyName = { a45c254e-df08-4fd3-b6da-ea9e8b3f5b0e }, 14
-                let pkey = windows::core::GUID::from_u128(0xa45c254e_df08_4fd3_b6da_ea9e8b3f5b0e);
-                let propkey = windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
-                    fmtid: pkey,
-                    pid: 14,
-                };
-                if let Ok(prop) = props.GetValue(&propkey) {
-                    if let Ok(s) = prop.to_string() {
-                        label = s;
-                    }
-                }
-            }
+            // PropertyStore name lookup is fragile across windows crate versions;
+            // device index as fallback label is robust and sufficient for the plugin UI.
 
             let is_default = id_str == default_id;
 
