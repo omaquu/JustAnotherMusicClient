@@ -26,10 +26,12 @@ import { hydrateAudioQualitySettings } from "./internal/audioQuality";
 import { hydrateYouTubeAccountSettings } from "./ui/settings/youtubeAccount";
 import { hydratePluginHost } from "./plugins/pluginHost";
 import { registerDownloaderPlugin } from "./plugins/official/downloader/manifest";
+import { registerOutputDevicePlugin } from "./plugins/official/output-device/manifest";
 import {
   hydrateDownloaderStore,
   setDownloaderStreamResolver,
 } from "./plugins/official/downloader/downloaderStore";
+import { hydrateOutputDeviceStore } from "./plugins/official/output-device/outputDeviceStore";
 import { resolveDownloadStream } from "./player/playerStore";
 
 logInternalInfo("main.bootstrap start");
@@ -37,6 +39,7 @@ applyPlatformAttributes();
 applyPaperPcMode();
 applyAppTheme();
 registerDownloaderPlugin();
+registerOutputDevicePlugin();
 setDownloaderStreamResolver(resolveDownloadStream);
 void applyNativeWindowControls();
 void hydrateMainWindowGeometry().then(restoreMainWindowGeometry).catch((error) => {
@@ -55,7 +58,10 @@ void Promise.all([
   hydrateAudioQualitySettings(),
   hydrateYouTubeAccountSettings(),
   hydrateAppTheme(),
-  hydratePluginHost().then(() => hydrateDownloaderStore()),
+  hydratePluginHost().then(() => {
+    void hydrateDownloaderStore();
+    void hydrateOutputDeviceStore();
+  }),
 ]).catch((error) => {
   logInternalError("settings hydration failed", error);
 });

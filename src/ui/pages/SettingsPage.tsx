@@ -136,6 +136,8 @@ import {
   useDownloaderState,
 } from "../../plugins/official/downloader/downloaderStore";
 import { DOWNLOADER_PLUGIN_ID } from "../../plugins/official/downloader/manifest";
+import { OUTPUT_DEVICE_PLUGIN_ID } from "../../plugins/official/output-device/manifest";
+import { OutputDevicePanel } from "../components/OutputDeviceSettings";
 import { isLinux } from "../platform";
 import { GITHUB_REPOSITORY_URL } from "../errors/errorManager";
 import {
@@ -1461,6 +1463,13 @@ export function SettingsPage({
 
                       {pluginError && <p className={styles.error}>{pluginError}</p>}
                     </div>
+                  )}
+
+                  {plugin.enabled && plugin.manifest.id === OUTPUT_DEVICE_PLUGIN_ID && (
+                    <OutputDevicePanel
+                      styles={styles}
+                      IconRefresh={IconRefresh}
+                    />
                   )}
                 </div>
               ))}

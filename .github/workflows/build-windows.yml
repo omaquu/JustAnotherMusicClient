@@ -1,0 +1,62 @@
+name: Build Windows .exe
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+    
+    - name: Install Rust target
+      run: rustup target add x86_64-pc-windows-msvc
+    
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src-tauri/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build Tauri app
+      uses: tauri-apps/tauri-action@v0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tagName: v1.3.1-output-device-${{ github.run_number }}
+        releaseName: 'JAMC with Output Device Plugin #${{ github.run_number }}'
+        releaseBody: |
+          ## Just Another Music Client — Output Device Plugin Bundle
+          
+          This build includes the Output Device plugin pre-installed.
+          You can now select which audio output device JAMC uses from Settings → Plugins → Output Device.
+          
+          **Features:**
+          - List all available audio output devices (WASAPI on Windows)
+          - Select output device from dropdown
+          - Selection persists across restarts (localStorage)
+          - Works with native audio playback (HTMLAudioElement.setSinkId)
+          
+          **Install:** Download the .msi or .exe installer below.
+        releaseDrafts: false
+        prerelease: false
+        args: --target x86_64-pc-windows-msvc

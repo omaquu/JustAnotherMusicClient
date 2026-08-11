@@ -128,6 +128,8 @@ export class AudioEngine {
   private muted = false;
   private onEnded: (() => void) | null = null;
   private loadRequestId = 0;
+  private sinkId: string | null = null;
+  private deviceChangeListener: (() => void) | null = null;
   private stateWaiters = new Set<{
     states: Set<number>;
     videoId: string | null;
@@ -138,6 +140,19 @@ export class AudioEngine {
 
   constructor() {
     audioEngines.add(this);
+    // Listen for output device changes from the Output Device plugin.
+    this.deviceChangeListener = () => {
+      this.applyOutputSink();
+    };
+    window.addEventListener("output-device-change", this.deviceChangeListener);
+  }
+
+  destroy(): void {
+    if (this.deviceChangeListener) {
+      window.removeEventListener("output-device-change", this.deviceChangeListener);
+      this.deviceChangeListener = null;
+    }
+    audioEngines.delete(this);
   }
 
   usesNativeAudio(): boolean {
@@ -460,6 +475,56 @@ export class AudioEngine {
     if (!this.audio) return;
     this.audio.volume = this.muted ? 0 : this.volume;
     this.audio.muted = this.muted;
+    this.applyOutputSink();
+  }
+
+  /**
+   * Apply the configured output device (sinkId) to the current native audio element.
+   * Called when audio is loaded or when the output device changes via the plugin.
+   * Reads the current selection from localStorage (written by the Output Device plugin).
+   */
+  private applyOutputSink(): void {
+    if (!this.audio) return;
+    // Read the selected device from localStorage (Output Device plugin stores it there)
+    try {
+      const raw = localStorage.getItem("plugin.output-device.settings.v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.outputDevice === "string") {
+          this.sinkId = parsed.outputDevice;
+        }
+      }
+    } catch {
+      // Settings not yet hydrated — ignore
+    }
+    if (!this.sinkId || this.sinkId === "default") return;
+    const audio = this.audio as HTMLAudioElement & {
+      setSinkId?(deviceId: string): Promise<void>;
+    };
+    if (typeof audio.setSinkId !== "function") {
+      logInternalWarn("AudioEngine.applyOutputSink setSinkId not supported", {
+        sinkId: this.sinkId,
+      });
+      return;
+    }
+    audio.setSinkId(this.sinkId).catch((error) => {
+      logInternalError("AudioEngine.applyOutputSink failed", error instanceof Error ? error : new Error(String(error)), {
+        sinkId: this.sinkId,
+      });
+    });
+  }
+
+  /**
+   * Set the output device for native (downloaded) audio playback.
+   * Routes audio to a specific hardware output device using the W3C setSinkId API.
+   * Only affects HTMLAudioElement (downloaded tracks), not the YouTube IFrame player.
+   *
+   * @param deviceId The audio output device ID (from the Output Device plugin),
+   *                 or null/empty to revert to the system default.
+   */
+  setOutputSink(deviceId: string | null): void {
+    this.sinkId = deviceId || null;
+    this.applyOutputSink();
   }
 
   private applyOutputVolume(): void {

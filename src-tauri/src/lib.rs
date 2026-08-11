@@ -48,6 +48,7 @@ mod windows_media;
 
 mod discord_rpc;
 mod lastfm;
+mod output_device;
 
 // Keep the legacy service name so existing sign-in credentials survive the product rename.
 const KEYRING_SERVICE: &str = "com.ytmusicdock.app";
@@ -3431,6 +3432,7 @@ pub fn run() {
             lastfm::lastfm_update_now_playing,
             discord_rpc_update,
             discord_rpc_clear,
+            output_device::list_audio_output_devices,
             #[cfg(target_os = "macos")]
             macos_media::update_macos_media_session,
             #[cfg(target_os = "windows")]
