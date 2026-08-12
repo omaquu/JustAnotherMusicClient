@@ -1,7 +1,4 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { logInternalError } from "./logging";
 
 const RELEASE_TAG_PREFIX = "v";
 const RELEASES_URL =
@@ -16,7 +13,6 @@ export interface UpdateInfo {
   version: string;
   releaseUrl: string;
   canInstall: boolean;
-  update?: Update;
 }
 
 export interface UpdateInstallProgress {
@@ -70,73 +66,16 @@ async function checkViaGithubApi(): Promise<UpdateInfo | null> {
 }
 
 export async function checkForUpdates(): Promise<UpdateInfo | null> {
-  const isMacOS =
-    typeof navigator !== "undefined" && /Macintosh|Mac OS X/.test(navigator.userAgent);
-
-  if (isMacOS) {
-    return checkViaGithubApi();
-  }
-
-  let update: Update | null;
-  try {
-    update = await check();
-  } catch (error) {
-    logInternalError("updateChecker.checkForUpdates failed", error);
-    throw error;
-  }
-
-  if (!update) return null;
-
-  return {
-    installedVersion: update.currentVersion,
-    version: update.version,
-    releaseUrl: `${RELEASES_URL}/${RELEASE_TAG_PREFIX}${encodeURIComponent(update.version)}`,
-    canInstall: true,
-    update,
-  };
+  return checkViaGithubApi();
 }
 
 export async function installUpdate(
-  info: UpdateInfo,
-  onProgress?: (progress: UpdateInstallProgress) => void,
+  _info: UpdateInfo,
+  _onProgress?: (progress: UpdateInstallProgress) => void,
 ): Promise<void> {
-  if (!info.update) {
-    throw new Error(
-      "This update cannot be installed automatically. Please download it from the release page.",
-    );
-  }
-
-  let downloadedBytes = 0;
-  let totalBytes: number | undefined;
-
-  const reportProgress = (event: DownloadEvent) => {
-    if (event.event === "Started") {
-      downloadedBytes = 0;
-      totalBytes = event.data.contentLength;
-    } else if (event.event === "Progress") {
-      downloadedBytes += event.data.chunkLength;
-    } else if (event.event === "Finished" && totalBytes !== undefined) {
-      downloadedBytes = totalBytes;
-    }
-
-    onProgress?.({
-      downloadedBytes,
-      totalBytes,
-      percent: totalBytes && totalBytes > 0
-        ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
-        : undefined,
-    });
-  };
-
-  try {
-    await info.update.downloadAndInstall(reportProgress);
-    await relaunch();
-  } catch (error) {
-    logInternalError("updateChecker.installUpdate failed", error, {
-      version: info.version,
-    });
-    throw error;
-  }
+  throw new Error(
+    "Automatic updates are disabled in this build. Please download the new version from the release page.",
+  );
 }
 
 export function getUpdateFailureMessage(error: unknown): string {
